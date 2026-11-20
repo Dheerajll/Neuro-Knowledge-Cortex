@@ -1,21 +1,26 @@
 import { settings } from './settings'
+import { PHRASES, STOP, WORDMAP } from './lexicon'
 
-const DIM = 256
+const DIM = 384
 
-const STOP = new Set(
-  `a an the and or but if then than that this these those of in on at to for from with without by as is are was were be been being it its into over under about after before between during
-  i you he she we they me him her them my your our their not no do does did done have has had will would can could should may might must just also very more most some any each other such only own same so too s t`
-    .split(/\s+/)
-    .filter(Boolean)
-)
+function singular(word: string): string {
+  if (/(xes|ches|shes|sses|zes)$/.test(word)) return word.slice(0, -2)
+  if (word.endsWith('ies') && word.length > 4) return `${word.slice(0, -3)}y`
+  if (word.endsWith('s') && !word.endsWith('ss') && word.length > 3) return word.slice(0, -1)
+  return word
+}
+
+export function canon(word: string): string {
+  if (WORDMAP[word]) return WORDMAP[word]
+  const base = singular(word)
+  return WORDMAP[base] ?? base
+}
 
 export function tokenize(text: string): string[] {
-  return text
-    .toLowerCase()
-    .replace(/[`*_#>\[\]()]/g, ' ')
-    .split(/[^a-z0-9+#.-]+/)
-    .map((t) => t.replace(/^[.-]+|[.-]+$/g, ''))
-    .filter((t) => t.length > 1 && t.length < 40 && !STOP.has(t))
+  const raw = String(text).toLowerCase().match(/[a-z][a-z0-9-]+/g) ?? []
+  return raw
+    .filter((w) => w.length >= 2 && !STOP.has(w) && !STOP.has(singular(w)))
+    .map(canon)
 }
 
 function fnv1a(str: string, seed = 0x811c9dc5): number {
@@ -36,19 +41,25 @@ function add(vec: Float32Array, term: string, weight: number): void {
 export function localEmbed(title: string, body: string, tags: string[]): Float32Array {
   const vec = new Float32Array(DIM)
   const titleTokens = tokenize(title)
+  const tagTokens = tags.flatMap(tokenize)
   const bodyTokens = tokenize(body)
 
   for (const t of titleTokens) add(vec, t, 3)
-  for (const t of tags.flatMap(tokenize)) add(vec, t, 2)
+  for (const t of tagTokens) add(vec, t, 2)
   for (const t of bodyTokens) add(vec, t, 1)
 
-  const sequence = [...titleTokens, ...bodyTokens]
+  const sequence = [...titleTokens, ...tagTokens, ...bodyTokens]
   for (let i = 0; i < sequence.length - 1; i++) add(vec, `${sequence[i]}_${sequence[i + 1]}`, 0.6)
+
+  const full = `${title} ${tags.join(' ')} ${body}`.toLowerCase()
+  for (const [phrase, target] of PHRASES) {
+    if (full.includes(phrase)) add(vec, target, 2.5)
+  }
 
   for (const t of sequence) {
     if (t.length < 5) continue
     const padded = `^${t}$`
-    for (let i = 0; i < padded.length - 2; i++) add(vec, `#${padded.slice(i, i + 3)}`, 0.25)
+    for (let i = 0; i < padded.length - 2; i++) add(vec, `#${padded.slice(i, i + 3)}`, 0.2)
   }
 
   let norm = 0
@@ -77,7 +88,7 @@ async function remoteEmbed(text: string): Promise<Float32Array | null> {
     if (!res.ok) return null
     const json = (await res.json()) as { data?: { embedding?: number[] }[] }
     const raw = json.data?.[0]?.embedding
-    if (!raw || !raw.length) return null
+    if (!raw?.length) return null
     const vec = Float32Array.from(raw)
     let norm = 0
     for (let i = 0; i < vec.length; i++) norm += vec[i] * vec[i]
@@ -92,17 +103,12 @@ async function remoteEmbed(text: string): Promise<Float32Array | null> {
 export async function embedNote(title: string, body: string, tags: string[]): Promise<Float32Array> {
   const local = localEmbed(title, body, tags)
   const remote = await remoteEmbed(`${title}\n\n${tags.join(' ')}\n\n${body}`)
-  if (!remote) return local
-
-  // Remote and local have different dimensions; keep a hybrid by projecting the
-  // remote vector into the local space only when dimensions match, else use remote.
-  return remote.length === DIM ? remote : remote
+  return remote ?? local
 }
 
 export function cosine(a: Float32Array, b: Float32Array): number {
-  const len = Math.min(a.length, b.length)
   if (a.length !== b.length) return 0
   let dot = 0
-  for (let i = 0; i < len; i++) dot += a[i] * b[i]
+  for (let i = 0; i < a.length; i++) dot += a[i] * b[i]
   return dot
 }

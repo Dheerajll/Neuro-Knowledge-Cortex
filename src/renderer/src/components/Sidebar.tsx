@@ -14,7 +14,6 @@ interface Props {
 
 export default function Sidebar(props: Props) {
   const { graph, notes } = props
-  const clusters = [...graph.clusters].sort((a, b) => b.members.length - a.members.length)
 
   const visible = props.activeCluster
     ? notes.filter((n) => graph.clusters.find((c) => c.id === props.activeCluster)?.members.includes(n.id))
@@ -50,17 +49,26 @@ export default function Sidebar(props: Props) {
         {!graph.nodes.length && <div className="empty-hint">Nothing yet. Write a note and it becomes a neuron.</div>}
 
         {graph.groups.map((group) => {
-          const members = clusters.filter((c) => group.clusters.includes(c.id))
+          const members = graph.clusters
+            .filter((c) => group.clusters.includes(c.id))
+            .sort((a, b) => b.members.length - a.members.length)
           if (!members.length) return null
+          const total = members.reduce((sum, c) => sum + c.members.length, 0)
           return (
-            <div key={group.id}>
-              <div className="group-head">{group.label}</div>
+            <div key={group.id} style={{ ['--group-hue' as string]: group.hue }}>
+              <div className="group-head" style={{ color: group.hue }}>
+                <span className="group-glyph">{group.glyph}</span>
+                {group.label}
+                <span className="group-count">{total}</span>
+              </div>
               {members.map((cluster) => (
                 <button
                   key={cluster.id}
                   className={`cluster ${props.activeCluster === cluster.id ? 'active' : ''}`}
                   onClick={() => props.onCluster(cluster.id === props.activeCluster ? null : cluster.id)}
+                  style={{ ['--cluster-color' as string]: cluster.color }}
                 >
+                  <span className="cluster-dot" />
                   <span>{cluster.label}</span>
                   <span className="count">{cluster.members.length}</span>
                 </button>

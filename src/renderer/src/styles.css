@@ -797,3 +797,57 @@ button {
   padding-bottom: 5px;
   margin-top: 4px;
 }
+
+.group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font: 600 10px/1 var(--font-ui);
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  padding: 14px 8px 6px;
+  border-top: 1px solid var(--line);
+  margin-top: 8px;
+}
+
+.group-head:first-child {
+  border-top: none;
+  margin-top: 0;
+}
+
+.group-glyph {
+  font-size: 11px;
+  line-height: 1;
+}
+
+.group-count {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-mute);
+  font-weight: 500;
+}
+
+.cluster {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.cluster-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--cluster-color, var(--ink-mute));
+}
+
+.cluster.active .cluster-dot {
+  box-shadow: 0 0 0 2px var(--clay-soft);
+}
+
+.cluster span:not(.cluster-dot):not(.count) {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

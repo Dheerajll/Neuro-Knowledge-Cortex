@@ -1,7 +1,8 @@
-import { all, avgLength } from './index-db'
+import { all } from './index-db'
 import { cosine } from './embed'
 import { tokenize } from './embed'
 import { settings } from './settings'
+import { DOMAINS, DOMAIN_BY_ID, NAMES } from './lexicon'
 
 export interface GraphNode {
   id: string
@@ -11,6 +12,7 @@ export interface GraphNode {
   degree: number
   updatedAt: number
   tags: string[]
+  color: string
 }
 
 export interface Edge {
@@ -24,13 +26,23 @@ export interface Bucket {
   label: string
   members: string[]
   group: string
+  color: string
+}
+
+export interface Group {
+  id: string
+  label: string
+  short: string
+  hue: string
+  glyph: string
+  clusters: string[]
 }
 
 export interface Graph {
   nodes: GraphNode[]
   edges: Edge[]
   clusters: Bucket[]
-  groups: { id: string; label: string; clusters: string[] }[]
+  groups: Group[]
   builtAt: number
 }
 
@@ -42,10 +54,84 @@ export function invalidate(): void {
   cache = null
 }
 
-function centroid(vectors: Float32Array[]): Float32Array {
-  const dim = vectors[0].length
+function display(term: string): string {
+  return NAMES[term] ?? term.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+}
+
+function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text
+}
+
+function weightedTerms(title: string, tags: string[], body: string): Map<string, number> {
+  const terms = new Map<string, number>()
+  const bump = (list: string[], weight: number): void => {
+    for (const term of list) terms.set(term, (terms.get(term) ?? 0) + weight)
+  }
+  bump(tokenize(title), 3)
+  bump(tags.flatMap(tokenize), 2)
+  bump(tokenize(body.slice(0, 1200)), 1)
+  return terms
+}
+
+function nameBucket(members: string[], lookup: Map<string, ReturnType<typeof all>[number]>): string {
+  const aggregate = new Map<string, number>()
+  for (const id of members) {
+    const entry = lookup.get(id)
+    if (!entry) continue
+    const note = entry.note
+    for (const [term, weight] of weightedTerms(note.title, note.tags, note.body)) {
+      aggregate.set(term, (aggregate.get(term) ?? 0) + weight)
+    }
+  }
+  const ranked = [...aggregate.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+  if (!ranked.length) {
+    const entry = lookup.get(members[0])
+    return entry ? truncate(entry.note.title, 26) : 'Cluster'
+  }
+
+  let label = display(ranked[0][0])
+  const top = ranked[0][1]
+  for (let i = 1; i < ranked.length && i < 6; i++) {
+    const candidate = display(ranked[i][0])
+    if (ranked[i][1] >= top * 0.42 && candidate !== label) {
+      label += ` · ${candidate}`
+      break
+    }
+  }
+  return truncate(label, 34)
+}
+
+function domainOf(members: string[], lookup: Map<string, ReturnType<typeof all>[number]>): string {
+  const scores = new Map<string, number>()
+  for (const id of members) {
+    const entry = lookup.get(id)
+    if (!entry) continue
+    const note = entry.note
+    const titleTerms = tokenize(`${note.title} ${note.tags.join(' ')}`)
+    const bodyTerms = tokenize(note.body.slice(0, 1200))
+    for (const domain of DOMAINS) {
+      if (!domain.lex.size) continue
+      let score = 0
+      for (const term of titleTerms) if (domain.lex.has(term)) score += 3
+      for (const term of bodyTerms) if (domain.lex.has(term)) score += 1
+      if (score) scores.set(domain.id, (scores.get(domain.id) ?? 0) + score)
+    }
+  }
+  let best = 'frontier'
+  let bestScore = 2.5
+  for (const [id, score] of scores) {
+    if (score > bestScore) {
+      bestScore = score
+      best = id
+    }
+  }
+  return best
+}
+
+function centroidOf(vectors: Float32Array[]): Float32Array {
+  const dim = vectors[0]?.length ?? 0
   const out = new Float32Array(dim)
-  for (const v of vectors) for (let i = 0; i < dim; i++) out[i] += v[i]
+  for (const vector of vectors) for (let i = 0; i < dim; i++) out[i] += vector[i]
   let norm = 0
   for (let i = 0; i < dim; i++) norm += out[i] * out[i]
   norm = Math.sqrt(norm) || 1
@@ -53,43 +139,29 @@ function centroid(vectors: Float32Array[]): Float32Array {
   return out
 }
 
-function labelFor(members: string[]): string {
-  const counts = new Map<string, number>()
-  for (const id of members) {
-    const entry = all().find((e) => e.note.id === id)
-    if (!entry) continue
-    for (const t of new Set(tokenize(`${entry.note.title} ${entry.note.tags.join(' ')} ${entry.note.body.slice(0, 800)}`))) {
-      counts.set(t, (counts.get(t) ?? 0) + 1)
-    }
-  }
-  const ranked = [...counts.entries()].sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0]))
-  const top = ranked.slice(0, 2).map(([t]) => t)
-  if (!top.length) return 'Untitled cluster'
-  return top.join(' · ')
-}
-
 export function build(): Graph {
   if (!dirty && cache) return cache
 
   const entries = all()
-  const ids = entries.map((e) => e.note.id)
-  const vectors = new Map(entries.map((e) => [e.note.id, e.vector]))
+  const lookup = new Map(entries.map((entry) => [entry.note.id, entry]))
+  const ids = entries.map((entry) => entry.note.id)
+  const vectors = new Map(entries.map((entry) => [entry.note.id, entry.vector]))
   const threshold = settings().edgeThreshold
-  const k = 5
+  const neighbours = 5
 
   const edges: Edge[] = []
   const seen = new Set<string>()
 
   for (const source of ids) {
-    const sv = vectors.get(source)!
+    const vector = vectors.get(source)!
     const scored: { id: string; sim: number }[] = []
     for (const target of ids) {
       if (target === source) continue
-      const sim = cosine(sv, vectors.get(target)!)
+      const sim = cosine(vector, vectors.get(target)!)
       if (sim >= threshold) scored.push({ id: target, sim })
     }
     scored.sort((a, b) => b.sim - a.sim)
-    for (const { id: target, sim } of scored.slice(0, k)) {
+    for (const { id: target, sim } of scored.slice(0, neighbours)) {
       const key = source < target ? `${source}|${target}` : `${target}|${source}`
       if (seen.has(key)) continue
       seen.add(key)
@@ -97,12 +169,10 @@ export function build(): Graph {
     }
   }
 
-  // Label propagation over the edge graph.
-  const neighbours = new Map<string, { id: string; weight: number }[]>()
-  for (const id of ids) neighbours.set(id, [])
-  for (const e of edges) {
-    neighbours.get(e.a)!.push({ id: e.b, weight: e.weight })
-    neighbours.get(e.b)!.push({ id: e.a, weight: e.weight })
+  const adjacency = new Map<string, { id: string; weight: number }[]>(ids.map((id) => [id, []]))
+  for (const edge of edges) {
+    adjacency.get(edge.a)!.push({ id: edge.b, weight: edge.weight })
+    adjacency.get(edge.b)!.push({ id: edge.a, weight: edge.weight })
   }
 
   const label = new Map<string, string>(ids.map((id) => [id, id]))
@@ -110,12 +180,12 @@ export function build(): Graph {
     let changed = 0
     for (const id of ids) {
       const scores = new Map<string, number>()
-      for (const n of neighbours.get(id)!) {
-        const l = label.get(n.id)!
-        scores.set(l, (scores.get(l) ?? 0) + n.weight)
+      for (const neighbour of adjacency.get(id)!) {
+        const current = label.get(neighbour.id)!
+        scores.set(current, (scores.get(current) ?? 0) + neighbour.weight)
       }
       if (!scores.size) continue
-      const best = [...scores.entries()].sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0]))[0]
+      const best = [...scores.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]
       if (best[0] !== label.get(id)) {
         label.set(id, best[0])
         changed++
@@ -126,78 +196,67 @@ export function build(): Graph {
 
   const byLabel = new Map<string, string[]>()
   for (const id of ids) {
-    const l = label.get(id)!
-    if (!byLabel.has(l)) byLabel.set(l, [])
-    byLabel.get(l)!.push(id)
+    const current = label.get(id)!
+    if (!byLabel.has(current)) byLabel.set(current, [])
+    byLabel.get(current)!.push(id)
   }
 
-  // Agglomerate clusters into knowledge-base groups via centroid similarity.
-  const bucketIds = [...byLabel.keys()].sort()
-  const centroids = new Map(
-    bucketIds.map((b) => [b, centroid(byLabel.get(b)!.map((id) => vectors.get(id)!))])
-  )
-  const groupOf = new Map<string, string>(bucketIds.map((b) => [b, b]))
-  for (let round = 0; round < 6; round++) {
-    let changed = 0
-    for (const b of bucketIds) {
-      const scores = new Map<string, number>()
-      for (const other of bucketIds) {
-        if (other === b) continue
-        const sim = cosine(centroids.get(b)!, centroids.get(other)!)
-        if (sim < threshold * 0.6) continue
-        const g = groupOf.get(other)!
-        scores.set(g, (scores.get(g) ?? 0) + sim)
-      }
-      if (!scores.size) continue
-      const best = [...scores.entries()].sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0]))[0]
-      if (best[0] !== groupOf.get(b)) {
-        groupOf.set(b, best[0])
-        changed++
-      }
+  const order = new Map(DOMAINS.map((domain, index) => [domain.id, index]))
+
+  const clusters: Bucket[] = [...byLabel.entries()].map(([bucketId, members]) => {
+    const group = domainOf(members, lookup)
+    return {
+      id: `c${bucketId.slice(0, 8)}`,
+      label: nameBucket(members, lookup),
+      members,
+      group,
+      color: DOMAIN_BY_ID[group].tints[members.length % 2]
     }
-    if (!changed) break
-  }
+  })
+
+  clusters.sort((a, b) => {
+    const da = order.get(a.group) ?? 99
+    const db = order.get(b.group) ?? 99
+    return da - db || b.members.length - a.members.length || a.label.localeCompare(b.label)
+  })
+
+  const clusterOf = new Map<string, Bucket>()
+  for (const cluster of clusters) for (const id of cluster.members) clusterOf.set(id, cluster)
 
   const degree = new Map<string, number>(ids.map((id) => [id, 0]))
-  for (const e of edges) {
-    degree.set(e.a, (degree.get(e.a) ?? 0) + 1)
-    degree.set(e.b, (degree.get(e.b) ?? 0) + 1)
+  for (const edge of edges) {
+    degree.set(edge.a, (degree.get(edge.a) ?? 0) + 1)
+    degree.set(edge.b, (degree.get(edge.b) ?? 0) + 1)
   }
 
-  const nodes: GraphNode[] = entries.map((e) => ({
-    id: e.note.id,
-    title: e.note.title,
-    cluster: label.get(e.note.id)!,
-    group: groupOf.get(label.get(e.note.id)!)!,
-    degree: degree.get(e.note.id) ?? 0,
-    updatedAt: e.note.updatedAt,
-    tags: e.note.tags
-  }))
-
-  const clusters: Bucket[] = bucketIds.map((b) => ({
-    id: b,
-    label: labelFor(byLabel.get(b)!),
-    members: byLabel.get(b)!,
-    group: groupOf.get(b)!
-  }))
+  const nodes: GraphNode[] = entries.map((entry) => {
+    const cluster = clusterOf.get(entry.note.id)!
+    return {
+      id: entry.note.id,
+      title: entry.note.title,
+      cluster: cluster.id,
+      group: cluster.group,
+      degree: degree.get(entry.note.id) ?? 0,
+      updatedAt: entry.note.updatedAt,
+      tags: entry.note.tags,
+      color: cluster.color
+    }
+  })
 
   const groupMap = new Map<string, string[]>()
-  for (const c of clusters) {
-    if (!groupMap.has(c.group)) groupMap.set(c.group, [])
-    groupMap.get(c.group)!.push(c.id)
+  for (const cluster of clusters) {
+    if (!groupMap.has(cluster.group)) groupMap.set(cluster.group, [])
+    groupMap.get(cluster.group)!.push(cluster.id)
   }
 
-  const groups = [...groupMap.entries()]
-    .map(([id, clusterIds]) => ({
-      id,
-      clusters: clusterIds,
-      label: labelFor(clusterIds.flatMap((cid) => clusters.find((c) => c.id === cid)!.members))
-    }))
-    .sort((a, b) => b.clusters.length - a.clusters.length)
+  const groups: Group[] = [...groupMap.entries()]
+    .map(([id, clusterIds]) => {
+      const domain = DOMAIN_BY_ID[id] ?? DOMAIN_BY_ID.frontier
+      return { id, label: domain.label, short: domain.short, hue: domain.tints[0], glyph: domain.glyph, clusters: clusterIds }
+    })
+    .sort((a, b) => (order.get(a.id) ?? 99) - (order.get(b.id) ?? 99))
 
   cache = { nodes, edges, clusters, groups, builtAt: Date.now() }
   dirty = false
   return cache
 }
-
-export { avgLength }
