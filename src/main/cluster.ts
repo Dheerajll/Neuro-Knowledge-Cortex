@@ -1,4 +1,5 @@
-import { all, cosine, avgLength } from './index-db'
+import { all, avgLength } from './index-db'
+import { cosine } from './embed'
 import { tokenize } from './embed'
 import { settings } from './settings'
 
